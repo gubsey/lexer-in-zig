@@ -23,6 +23,89 @@ const State = enum {
     Operator,
 };
 
+const LexemeBuilder = struct {
+    acc: std.ArrayList(Lexeme),
+    alloc: std.mem.Allocator,
+    state: State = .New,
+    buffer: ?[]const u8,
+    buffer_pos: usize = 0,
+
+    fn init(alloc: std.mem.Allocator) @This() {
+        return .{
+            .acc = std.ArrayList(Lexeme).init(alloc),
+            .alloc = alloc,
+        };
+    }
+
+    fn deinit(self: @This()) void {
+        self.acc.deinit();
+    }
+
+    fn iter(self: @This(), buffer: []const u8) void {
+        self.buffer = buffer;
+    }
+
+    fn next(self: @This()) !?Lexeme {
+        var r: ?Lexeme = null;
+        const buf = self.buffer orelse return error.iter_not_initialized;
+        while (self.buffer_pos < buf.len and !r) : (self.buffer_pos += 1) {
+            switch (buf[self.buffer_pos]) {
+                'a'...'z',
+                'A'...'Z',
+                => |b| {
+                    switch (self.state) {
+                        .Operator => {
+                            r = try self.complete_acc();
+                            continue;
+                        },
+                        .New, .String => {},
+                    }
+
+                    self.state = .String;
+                    try self.acc.append(b);
+                },
+                '=' => |b| {
+                    switch (self.state) {
+                        .String => {
+                            r = try self.complete_acc();
+                            continue;
+                        },
+                        .String, .Operator => {},
+                    }
+
+                    self.state = .Operator;
+                    try self.acc.append(b);
+                },
+                ' ' => {
+                    switch (self.state) {
+                        .New => {},
+                        .String, .Operator => {
+                            r = try self.complete_acc();
+                            continue;
+                        },
+                    }
+
+                    self.state = .New;
+                },
+            }
+        }
+
+        return r;
+    }
+
+    fn complete_acc(self: @This()) !Lexeme {
+        const str = try self.acc.toOwnedSlice();
+        defer self.alloc.free(str);
+        self.state = .New;
+
+        if (std.meta.stringToEnum(Symbol, str)) |case| {
+            return .{ .symbol = case };
+        } else {
+            return .{ .name = str };
+        }
+    }
+};
+
 fn lex(file: []const u8, alloc: std.mem.Allocator) ![]Lexeme {
     var state = State.New;
 
@@ -45,18 +128,7 @@ fn lex(file: []const u8, alloc: std.mem.Allocator) ![]Lexeme {
             => {
                 switch (state) {
                     .New => {},
-                    .String, .Operator => {
-                        const str = try acc.toOwnedSlice();
-                        defer alloc.free(str);
-                        if (std.meta.stringToEnum(Symbol, str)) |case| {
-                            try r.append(.{ .symbol = case });
-                        } else {
-                            try r.append(.{ .name = str });
-                        }
-
-                        state = .New;
-                        acc.clearAndFree();
-                    },
+                    .String, .Operator => {},
                 }
             },
             '=',
@@ -83,14 +155,17 @@ fn lex(file: []const u8, alloc: std.mem.Allocator) ![]Lexeme {
                     },
                 }
             },
-            else => unreachable,
+            else => |x| {
+                std.log.err("else {}", .{x});
+                unreachable;
+            },
         }
     }
     return try r.toOwnedSlice();
 }
 
 test "if then else" {
-    const lexemes = try lex("if x== y then x else y", std.testing.allocator);
+    const lexemes = try lex("if x == y then x else y", std.testing.allocator);
 
     for (lexemes) |l| {
         switch (l) {
